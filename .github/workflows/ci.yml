@@ -30,4 +30,5 @@ jobs:
           tar -xzf gitleaks_8.30.1_linux_x64.tar.gz gitleaks
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
       - name: Scan the full history for secrets
-        run: gitleaks git --no-banner --redact .
+        # -m also scans each merge commit against each parent; plain `git log -p` skips a secret added while resolving a conflict.
+        run: gitleaks git --no-banner --redact --log-opts="--all -m" .

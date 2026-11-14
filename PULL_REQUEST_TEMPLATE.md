@@ -19,3 +19,5 @@ Every DMC pull request follows five steps. The full rules are in the review poli
 5. Turn on auto-merge with `gh pr merge <n> --auto --merge` when you mark the pull request ready; in a repository with a merge queue, use `gh pr merge <n> --auto`, since the queue sets the strategy. Where nothing else requires the approval, turn it on once that approval is on the head. A person may merge a pull request that is green and approved; agents never merge by hand, and nobody uses `--admin`.
 Replace "Proof: pending" with "Proof: clip", "Proof: screenshots", or "Proof: checks - <why nothing a person runs changed>" before marking the pull request ready.
 -->
+
+Linked record: `dmc-technologies/momentum@demo/sprint-10`

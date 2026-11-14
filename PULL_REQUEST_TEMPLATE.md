@@ -6,6 +6,11 @@ Proof: pending
 
 ## Why this change was made
 
+Design check
+- Right place: <module> - owner: <repo/file:line "quoted clause">. Reuses: <existing function path:line, or "none in base", with the grep run>. Other open branches changing the same rule: <list or none>.
+- Scales: <each new value> comes from <record or request field> - <repo/file:line "quoted clause">. No case value, candidate or customer name, or branch on one in code.
+- Contract gaps: <none, or the question no clause answers and the doc it belongs in>.
+
 ## Evidence
 
 ## Excluded

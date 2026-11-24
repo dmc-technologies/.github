@@ -14,6 +14,8 @@
 # GitHub names a called job "<caller job> / <called job>", so this job's own check is "label-hold / label-hold".
 # The rulesets require "label-hold" from GitHub Actions (integration 15368). So the job also posts a check run
 # named exactly "label-hold" with the caller's GITHUB_TOKEN, which GitHub attributes to integration 15368.
+# It posts that run as in_progress before it reads anything, then completes the same run. So a run that is
+# cancelled or fails after the first post leaves the required check pending, never an earlier success.
 name: label-hold
 
 on:
@@ -42,6 +44,19 @@ jobs:
               event = json.load(f)
           pr = event.get("pull_request") or {}
           head = (pr.get("head") or {}).get("sha")
+          runs = f"repos/{os.environ['GITHUB_REPOSITORY']}/check-runs"
+          def api(method, path, body):
+              done = subprocess.run(["gh", "api", "-X", method, path, "--input", "-", "--jq", ".id"],
+                                    input=json.dumps(body), text=True, capture_output=True)
+              return done.stdout.strip() if done.returncode == 0 else None
+          if not head:
+              print("::error::the event has no pull request head SHA, so no label-hold check run was posted")
+              sys.exit(1)
+          run_id = api("POST", runs, {"name": "label-hold", "head_sha": head, "status": "in_progress",
+                                      "external_id": "label-hold-reusable"})
+          if not run_id:
+              print("::error::posting the in-progress label-hold check run failed")
+              sys.exit(1)
           labels = pr.get("labels")
           hold = os.environ["HOLD_LABEL"]
           if os.environ.get("GITHUB_RUN_ATTEMPT") != "1":
@@ -57,16 +72,9 @@ jobs:
                       "(event snapshot only, not live labels)")
           print(examined)
           print(title if ok else f"::error::{title}")
-          if not head:
-              print("::error::the event has no pull request head SHA, so no label-hold check run was posted")
-              sys.exit(1)
-          body = {"name": "label-hold", "head_sha": head, "status": "completed",
-                  "conclusion": "success" if ok else "failure", "external_id": "label-hold-reusable",
-                  "output": {"title": title, "summary": examined}}
-          posted = subprocess.run(["gh", "api", "-X", "POST", f"repos/{os.environ['GITHUB_REPOSITORY']}/check-runs",
-                                   "--input", "-", "--jq", ".id"], input=json.dumps(body), text=True)
-          if posted.returncode != 0:
-              print("::error::posting the label-hold check run failed")
+          if not api("PATCH", f"{runs}/{run_id}", {"status": "completed", "conclusion": "success" if ok else "failure",
+                                                   "output": {"title": title, "summary": examined}}):
+              print("::error::completing the label-hold check run failed; it stays in progress")
               sys.exit(1)
           sys.exit(0 if ok else 1)
           PY

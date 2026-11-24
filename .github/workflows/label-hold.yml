@@ -1,0 +1,99 @@
+# Reusable judgment-stop label hold (ENG-174). Logic from review-rules rules/judgment-stop.yml (MODEV-1241).
+# A caller runs it on pull_request:
+#
+#   on:
+#     pull_request:
+#       types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+#   permissions: {}
+#   jobs:
+#     label-hold:
+#       permissions:
+#         checks: write
+#         pull-requests: read
+#       uses: dmc-technologies/.github/.github/workflows/label-hold.yml@v1
+#
+# GitHub names a called job "<caller job> / <called job>", so this job's own check is "label-hold / label-hold".
+# The rulesets require "label-hold" from GitHub Actions (integration 15368). So the job also posts a check run
+# named exactly "label-hold" with the caller's GITHUB_TOKEN, which GitHub attributes to integration 15368.
+# Order matters, because runs on one head may finish in any order:
+#   1. Post that run as in_progress. A run cancelled or failing after this leaves the check pending.
+#   2. Read the labels live from the API, not from the event payload, for every open pull request whose head is
+#      this commit. The check belongs to the commit, so a hold on any of them holds the commit.
+#   3. Complete the same run.
+# So the newest label-hold run on a head always read the labels after it was created.
+name: label-hold
+
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  label-hold:
+    name: label-hold
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      checks: write
+      pull-requests: read
+    steps:
+      - name: Fail while the judgment-stop label is present, and post the label-hold check run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HOLD_LABEL: judgment-stop
+        # Nothing is checked out; the job reads only the event's pull request number and head and the live labels.
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess, sys
+          with open(os.environ["GITHUB_EVENT_PATH"]) as f:
+              pr = json.load(f).get("pull_request") or {}
+          head, number = (pr.get("head") or {}).get("sha"), pr.get("number")
+          repo = os.environ["GITHUB_REPOSITORY"]
+          def api(*args, body=None):
+              done = subprocess.run(["gh", "api", *args] + (["--input", "-"] if body else []),
+                                    input=json.dumps(body) if body else None, text=True, capture_output=True)
+              if done.returncode != 0:
+                  print(f"gh api {' '.join(args)} failed: {done.stderr.strip()} {done.stdout.strip()}")
+                  return None
+              return done.stdout.strip()
+          if not head or not number:
+              print("::error::the event has no pull request head SHA or number, so no label-hold check run was posted")
+              sys.exit(1)
+          run_id = api("-X", "POST", f"repos/{repo}/check-runs", "--jq", ".id",
+                       body={"name": "label-hold", "head_sha": head, "status": "in_progress",
+                             "external_id": "label-hold-reusable"})
+          if not run_id:
+              print("::error::posting the in-progress label-hold check run failed")
+              sys.exit(1)
+          hold = os.environ["HOLD_LABEL"]
+          # Every open pull request, filtered to those whose head is this commit, as "number<TAB>label,label". The
+          # commit-to-pulls lookup omits open pull requests once the commit is on the default branch, so it is not
+          # used. The event's own pull request is read directly too.
+          found = api(f"repos/{repo}/pulls?state=open&per_page=100", "--paginate", "--jq",
+                      f'.[] | select(.head.sha == "{head}") | "\\(.number)\\t\\([.labels[].name] | join(","))"')
+          own = api(f"repos/{repo}/issues/{number}/labels", "--paginate", "--jq", ".[].name")
+          if found is None or own is None:
+              ok, title, prs = False, "Reading the pull requests' labels failed, so the hold fails", "unread"
+          else:
+              labels = {str(number): set(own.splitlines())}
+              for line in found.splitlines():
+                  n, _, names = line.partition("\t")
+                  labels.setdefault(n, set()).update(filter(None, names.split(",")))
+              held = sorted((n for n, names in labels.items() if hold in names), key=int)
+              prs = ",".join(sorted(labels, key=int))
+              if held:
+                  ok, title = False, (f"Label {hold} is present on pull request {', '.join('#' + n for n in held)} at this "
+                                      "commit; a dmc-developers member removes it to release the merge")
+              else:
+                  ok, title = True, f"Label {hold} is absent from every open pull request at this commit"
+          examined = (f"examined: event={os.environ.get('GITHUB_EVENT_NAME', 'unknown')} pr={number} head={head} "
+                      f"open_prs_at_head={prs} (labels read live after this run was posted)")
+          print(examined)
+          print(title if ok else f"::error::{title}")
+          if not api("-X", "PATCH", f"repos/{repo}/check-runs/{run_id}", "--jq", ".id",
+                     body={"status": "completed", "conclusion": "success" if ok else "failure",
+                           "output": {"title": title, "summary": examined}}):
+              print("::error::completing the label-hold check run failed; it stays in progress")
+              sys.exit(1)
+          sys.exit(0 if ok else 1)
+          PY

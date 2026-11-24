@@ -1,0 +1,72 @@
+# Reusable judgment-stop label hold (ENG-174). Logic from review-rules rules/judgment-stop.yml (MODEV-1241).
+# A caller runs it on pull_request and grants checks: write:
+#
+#   on:
+#     pull_request:
+#       types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+#   permissions: {}
+#   jobs:
+#     label-hold:
+#       permissions:
+#         checks: write
+#       uses: dmc-technologies/.github/.github/workflows/label-hold.yml@v1
+#
+# GitHub names a called job "<caller job> / <called job>", so this job's own check is "label-hold / label-hold".
+# The rulesets require "label-hold" from GitHub Actions (integration 15368). So the job also posts a check run
+# named exactly "label-hold" with the caller's GITHUB_TOKEN, which GitHub attributes to integration 15368.
+name: label-hold
+
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  label-hold:
+    name: label-hold
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      checks: write
+    steps:
+      - name: Fail while the judgment-stop label is present, and post the label-hold check run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HOLD_LABEL: judgment-stop
+        # Labels come from the event payload; nothing is checked out. A re-run replays the original payload,
+        # whose labels may be stale, so a re-run fails closed: push, or add or remove a label, to re-check.
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess, sys
+          with open(os.environ["GITHUB_EVENT_PATH"]) as f:
+              event = json.load(f)
+          pr = event.get("pull_request") or {}
+          head = (pr.get("head") or {}).get("sha")
+          labels = pr.get("labels")
+          hold = os.environ["HOLD_LABEL"]
+          if os.environ.get("GITHUB_RUN_ATTEMPT") != "1":
+              ok, title = False, "Re-run attempts replay stale labels; push or change a label to re-check"
+          elif not isinstance(labels, list):
+              ok, title = False, "pull_request.labels is missing from the event payload, so the hold fails"
+          elif hold in [label["name"] for label in labels]:
+              ok, title = False, f"Label {hold} is present; a dmc-developers member removes it to release the merge"
+          else:
+              ok, title = True, f"Label {hold} is absent"
+          examined = (f"examined: event={os.environ.get('GITHUB_EVENT_NAME', 'unknown')} pr={pr.get('number', 'unknown')} "
+                      f"head={head or 'unknown'} labels={len(labels) if isinstance(labels, list) else 'missing'} "
+                      "(event snapshot only, not live labels)")
+          print(examined)
+          print(title if ok else f"::error::{title}")
+          if not head:
+              print("::error::the event has no pull request head SHA, so no label-hold check run was posted")
+              sys.exit(1)
+          body = {"name": "label-hold", "head_sha": head, "status": "completed",
+                  "conclusion": "success" if ok else "failure", "external_id": "label-hold-reusable",
+                  "output": {"title": title, "summary": examined}}
+          posted = subprocess.run(["gh", "api", "-X", "POST", f"repos/{os.environ['GITHUB_REPOSITORY']}/check-runs",
+                                   "--input", "-", "--jq", ".id"], input=json.dumps(body), text=True)
+          if posted.returncode != 0:
+              print("::error::posting the label-hold check run failed")
+              sys.exit(1)
+          sys.exit(0 if ok else 1)
+          PY

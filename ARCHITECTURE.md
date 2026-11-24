@@ -9,3 +9,4 @@ This repository holds the organization defaults GitHub applies to every dmc-tech
 | `AGENTS.md` | Instructions for agents working in this repository, starting with the DMC review policy block |
 | `.github/agent-accounts` | The GitHub logins that belong to agents |
 | `.github/workflows/ci.yml` | The required `CI` check: a gitleaks scan of the full history |
+| `.github/workflows/label-hold.yml` | Reusable `workflow_call`: the judgment-stop label hold, called by every DMC repository at `@v1` |

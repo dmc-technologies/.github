@@ -66,10 +66,11 @@ jobs:
               print("::error::posting the in-progress label-hold check run failed")
               sys.exit(1)
           hold = os.environ["HOLD_LABEL"]
-          # Open pull requests whose head is this commit, as "number<TAB>label,label"; the event's own pull request
-          # is read directly too, in case the commit lookup lags.
-          found = api(f"repos/{repo}/commits/{head}/pulls", "--paginate", "--jq",
-                      f'.[] | select(.state == "open" and .head.sha == "{head}") | "\\(.number)\\t\\([.labels[].name] | join(","))"')
+          # Every open pull request, filtered to those whose head is this commit, as "number<TAB>label,label". The
+          # commit-to-pulls lookup omits open pull requests once the commit is on the default branch, so it is not
+          # used. The event's own pull request is read directly too.
+          found = api(f"repos/{repo}/pulls?state=open&per_page=100", "--paginate", "--jq",
+                      f'.[] | select(.head.sha == "{head}") | "\\(.number)\\t\\([.labels[].name] | join(","))"')
           own = api(f"repos/{repo}/issues/{number}/labels", "--paginate", "--jq", ".[].name")
           if found is None or own is None:
               ok, title, prs = False, "Reading the pull requests' labels failed, so the hold fails", "unread"

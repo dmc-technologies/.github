@@ -17,7 +17,8 @@
 # named exactly "label-hold" with the caller's GITHUB_TOKEN, which GitHub attributes to integration 15368.
 # Order matters, because runs on one head may finish in any order:
 #   1. Post that run as in_progress. A run cancelled or failing after this leaves the check pending.
-#   2. Read the pull request's labels live from the API, not from the event payload.
+#   2. Read the labels live from the API, not from the event payload, for every open pull request whose head is
+#      this commit. The check belongs to the commit, so a hold on any of them holds the commit.
 #   3. Complete the same run.
 # So the newest label-hold run on a head always read the labels after it was created.
 name: label-hold
@@ -64,16 +65,28 @@ jobs:
           if not run_id:
               print("::error::posting the in-progress label-hold check run failed")
               sys.exit(1)
-          labels = api(f"repos/{repo}/issues/{number}/labels", "--paginate", "--jq", ".[].name")
           hold = os.environ["HOLD_LABEL"]
-          if labels is None:
-              ok, title = False, "Reading the pull request's labels failed, so the hold fails"
-          elif hold in labels.splitlines():
-              ok, title = False, f"Label {hold} is present; a dmc-developers member removes it to release the merge"
+          # Open pull requests whose head is this commit, as "number<TAB>label,label"; the event's own pull request
+          # is read directly too, in case the commit lookup lags.
+          found = api(f"repos/{repo}/commits/{head}/pulls", "--paginate", "--jq",
+                      f'.[] | select(.state == "open" and .head.sha == "{head}") | "\\(.number)\\t\\([.labels[].name] | join(","))"')
+          own = api(f"repos/{repo}/issues/{number}/labels", "--paginate", "--jq", ".[].name")
+          if found is None or own is None:
+              ok, title, prs = False, "Reading the pull requests' labels failed, so the hold fails", "unread"
           else:
-              ok, title = True, f"Label {hold} is absent"
+              labels = {str(number): set(own.splitlines())}
+              for line in found.splitlines():
+                  n, _, names = line.partition("\t")
+                  labels.setdefault(n, set()).update(filter(None, names.split(",")))
+              held = sorted((n for n, names in labels.items() if hold in names), key=int)
+              prs = ",".join(sorted(labels, key=int))
+              if held:
+                  ok, title = False, (f"Label {hold} is present on pull request {', '.join('#' + n for n in held)} at this "
+                                      "commit; a dmc-developers member removes it to release the merge")
+              else:
+                  ok, title = True, f"Label {hold} is absent from every open pull request at this commit"
           examined = (f"examined: event={os.environ.get('GITHUB_EVENT_NAME', 'unknown')} pr={number} head={head} "
-                      f"labels={'unread' if labels is None else len(labels.splitlines())} (live, read after this run was posted)")
+                      f"open_prs_at_head={prs} (labels read live after this run was posted)")
           print(examined)
           print(title if ok else f"::error::{title}")
           if not api("-X", "PATCH", f"repos/{repo}/check-runs/{run_id}", "--jq", ".id",

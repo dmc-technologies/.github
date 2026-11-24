@@ -1,5 +1,5 @@
 # Reusable judgment-stop label hold (ENG-174). Logic from review-rules rules/judgment-stop.yml (MODEV-1241).
-# A caller runs it on pull_request and grants checks: write:
+# A caller runs it on pull_request:
 #
 #   on:
 #     pull_request:
@@ -9,13 +9,17 @@
 #     label-hold:
 #       permissions:
 #         checks: write
+#         pull-requests: read
 #       uses: dmc-technologies/.github/.github/workflows/label-hold.yml@v1
 #
 # GitHub names a called job "<caller job> / <called job>", so this job's own check is "label-hold / label-hold".
 # The rulesets require "label-hold" from GitHub Actions (integration 15368). So the job also posts a check run
 # named exactly "label-hold" with the caller's GITHUB_TOKEN, which GitHub attributes to integration 15368.
-# It posts that run as in_progress before it reads anything, then completes the same run. So a run that is
-# cancelled or fails after the first post leaves the required check pending, never an earlier success.
+# Order matters, because runs on one head may finish in any order:
+#   1. Post that run as in_progress. A run cancelled or failing after this leaves the check pending.
+#   2. Read the pull request's labels live from the API, not from the event payload.
+#   3. Complete the same run.
+# So the newest label-hold run on a head always read the labels after it was created.
 name: label-hold
 
 on:
@@ -30,53 +34,51 @@ jobs:
     timeout-minutes: 2
     permissions:
       checks: write
+      pull-requests: read
     steps:
       - name: Fail while the judgment-stop label is present, and post the label-hold check run
         env:
           GH_TOKEN: ${{ github.token }}
           HOLD_LABEL: judgment-stop
-        # Labels come from the event payload; nothing is checked out. A re-run replays the original payload,
-        # whose labels may be stale, so a re-run fails closed: push, or add or remove a label, to re-check.
+        # Nothing is checked out; the job reads only the event's pull request number and head and the live labels.
         run: |
           python3 - <<'PY'
           import json, os, subprocess, sys
           with open(os.environ["GITHUB_EVENT_PATH"]) as f:
-              event = json.load(f)
-          pr = event.get("pull_request") or {}
-          head = (pr.get("head") or {}).get("sha")
-          runs = f"repos/{os.environ['GITHUB_REPOSITORY']}/check-runs"
-          def api(method, path, body):
-              done = subprocess.run(["gh", "api", "-X", method, path, "--input", "-", "--jq", ".id"],
-                                    input=json.dumps(body), text=True, capture_output=True)
+              pr = json.load(f).get("pull_request") or {}
+          head, number = (pr.get("head") or {}).get("sha"), pr.get("number")
+          repo = os.environ["GITHUB_REPOSITORY"]
+          def api(*args, body=None):
+              done = subprocess.run(["gh", "api", *args] + (["--input", "-"] if body else []),
+                                    input=json.dumps(body) if body else None, text=True, capture_output=True)
               if done.returncode != 0:
-                  print(f"{method} {path} failed: {done.stderr.strip()} {done.stdout.strip()}")
+                  print(f"gh api {' '.join(args)} failed: {done.stderr.strip()} {done.stdout.strip()}")
                   return None
               return done.stdout.strip()
-          if not head:
-              print("::error::the event has no pull request head SHA, so no label-hold check run was posted")
+          if not head or not number:
+              print("::error::the event has no pull request head SHA or number, so no label-hold check run was posted")
               sys.exit(1)
-          run_id = api("POST", runs, {"name": "label-hold", "head_sha": head, "status": "in_progress",
-                                      "external_id": "label-hold-reusable"})
+          run_id = api("-X", "POST", f"repos/{repo}/check-runs", "--jq", ".id",
+                       body={"name": "label-hold", "head_sha": head, "status": "in_progress",
+                             "external_id": "label-hold-reusable"})
           if not run_id:
               print("::error::posting the in-progress label-hold check run failed")
               sys.exit(1)
-          labels = pr.get("labels")
+          labels = api(f"repos/{repo}/issues/{number}/labels", "--paginate", "--jq", ".[].name")
           hold = os.environ["HOLD_LABEL"]
-          if os.environ.get("GITHUB_RUN_ATTEMPT") != "1":
-              ok, title = False, "Re-run attempts replay stale labels; push or change a label to re-check"
-          elif not isinstance(labels, list):
-              ok, title = False, "pull_request.labels is missing from the event payload, so the hold fails"
-          elif hold in [label["name"] for label in labels]:
+          if labels is None:
+              ok, title = False, "Reading the pull request's labels failed, so the hold fails"
+          elif hold in labels.splitlines():
               ok, title = False, f"Label {hold} is present; a dmc-developers member removes it to release the merge"
           else:
               ok, title = True, f"Label {hold} is absent"
-          examined = (f"examined: event={os.environ.get('GITHUB_EVENT_NAME', 'unknown')} pr={pr.get('number', 'unknown')} "
-                      f"head={head or 'unknown'} labels={len(labels) if isinstance(labels, list) else 'missing'} "
-                      "(event snapshot only, not live labels)")
+          examined = (f"examined: event={os.environ.get('GITHUB_EVENT_NAME', 'unknown')} pr={number} head={head} "
+                      f"labels={'unread' if labels is None else len(labels.splitlines())} (live, read after this run was posted)")
           print(examined)
           print(title if ok else f"::error::{title}")
-          if not api("PATCH", f"{runs}/{run_id}", {"status": "completed", "conclusion": "success" if ok else "failure",
-                                                   "output": {"title": title, "summary": examined}}):
+          if not api("-X", "PATCH", f"repos/{repo}/check-runs/{run_id}", "--jq", ".id",
+                     body={"status": "completed", "conclusion": "success" if ok else "failure",
+                           "output": {"title": title, "summary": examined}}):
               print("::error::completing the label-hold check run failed; it stays in progress")
               sys.exit(1)
           sys.exit(0 if ok else 1)

@@ -48,7 +48,10 @@ jobs:
           def api(method, path, body):
               done = subprocess.run(["gh", "api", "-X", method, path, "--input", "-", "--jq", ".id"],
                                     input=json.dumps(body), text=True, capture_output=True)
-              return done.stdout.strip() if done.returncode == 0 else None
+              if done.returncode != 0:
+                  print(f"{method} {path} failed: {done.stderr.strip()} {done.stdout.strip()}")
+                  return None
+              return done.stdout.strip()
           if not head:
               print("::error::the event has no pull request head SHA, so no label-hold check run was posted")
               sys.exit(1)
